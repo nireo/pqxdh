@@ -116,6 +116,7 @@ func bigToLe(x *big.Int, size int) []byte {
 	for i := 0; i < len(be) && i < size; i++ {
 		le[i] = be[len(be)-1-i]
 	}
+
 	return le
 }
 
