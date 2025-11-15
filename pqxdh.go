@@ -182,7 +182,7 @@ type Bundle struct {
 	spkSig []byte          // identity key signature of signed prekey
 
 	version    PQXDHVersion
-	bundleHash []byte
+	BundleHash []byte
 }
 
 // State represents a user in pqxdh a user can initiate a key exchange or it accept key exchange
@@ -196,10 +196,10 @@ type State struct {
 	signedPrekeySig []byte
 
 	// classical one-time prekeys (many; keyed by server-visible id)
-	oneTimePrekeys map[uint32]*OneTimePrekey
+	OneTimePreKeys map[uint32]*OneTimePrekey
 
 	// PQ one-time KEM keys (many; keyed by idKEM)
-	oneTimeKEMKeys map[KEMID]*OneTimeKEMKey
+	OneTimeKEMKeys map[KEMID]*OneTimeKEMKey
 
 	// PQ signed prekey (last resort) secret half lives locally
 	lastResortKEMdecap *mlkem.DecapsulationKey1024
@@ -265,8 +265,8 @@ func NewPQXDHState() (*State, error) {
 		signedPrekeySK:     spkSK,
 		signedPrekeyPK:     spkSK.PublicKey(),
 		signedPrekeySig:    spkSig,
-		oneTimePrekeys:     make(map[uint32]*OneTimePrekey),
-		oneTimeKEMKeys:     make(map[KEMID]*OneTimeKEMKey),
+		OneTimePreKeys:     make(map[uint32]*OneTimePrekey),
+		OneTimeKEMKeys:     make(map[KEMID]*OneTimeKEMKey),
 		lastResortKEMdecap: decap,
 		lastResortKEMencap: decap.EncapsulationKey(),
 		lastResortKEMid:    kemID,
@@ -299,7 +299,7 @@ func (ps *State) GenerateOneTimeKEMKeys(n int) error {
 			return fmt.Errorf("failed to sign encapsulation key: %w", err)
 		}
 
-		ps.oneTimeKEMKeys[id] = &OneTimeKEMKey{
+		ps.OneTimeKEMKeys[id] = &OneTimeKEMKey{
 			decap:     decap,
 			encap:     encap,
 			encapSig:  encapSig,
@@ -344,7 +344,7 @@ func (ps *State) GenerateOneTimePrekeys(n int) error {
 
 		// the private key needs to stored in-case the process actually uses the one-time public key such that
 		// we can perform the key exchange on the receiver end.
-		ps.oneTimePrekeys[id] = &OneTimePrekey{
+		ps.OneTimePreKeys[id] = &OneTimePrekey{
 			sk:        otpPriv,
 			pk:        pk,
 			pksig:     pksig,
@@ -363,7 +363,7 @@ func (b *Bundle) IsHashValid() (bool, error) {
 		return false, err
 	}
 
-	return bytes.Equal(got, b.bundleHash), nil
+	return bytes.Equal(got, b.BundleHash), nil
 }
 
 // Hash hashes the content of the bundle
@@ -399,7 +399,7 @@ func (ps *State) findMLKEM(id KEMID) (*mlkem.DecapsulationKey1024, *mlkem.Encaps
 		return ps.lastResortKEMdecap, ps.lastResortKEMencap, nil
 	}
 
-	if kp, ok := ps.oneTimeKEMKeys[id]; ok {
+	if kp, ok := ps.OneTimeKEMKeys[id]; ok {
 		return kp.decap, kp.encap, nil
 	} else {
 		return nil, nil, fmt.Errorf("kem key not found with id: %x", id)
@@ -408,11 +408,47 @@ func (ps *State) findMLKEM(id KEMID) (*mlkem.DecapsulationKey1024, *mlkem.Encaps
 
 // findOtpk find for a given id the one-time pre key it returns an error when nothing is found.
 func (ps *State) findOtpk(id uint32) (*OneTimePrekey, error) {
-	if k, ok := ps.oneTimePrekeys[id]; ok {
+	if k, ok := ps.OneTimePreKeys[id]; ok {
 		return k, nil
 	}
 
 	return nil, fmt.Errorf("one time prekey id [%d] not found", id)
+}
+
+// MakeBundleWithIDs creates a bundle just from given IDs. This can be used when the keys have not yet been fetched.
+// to make the exposed API cleaner.
+func (ps *State) MakeBundleWithIDs(encapID KEMID, otpkID *uint32) (*Bundle, error) {
+	bundle := &Bundle{
+		signingPub: ps.identity.signingPub,
+		idpk:       ps.identity.pk,
+		spkpk:      ps.signedPrekeyPK,
+		spkSig:     ps.signedPrekeySig,
+		version:    pqxdhV1,
+	}
+
+	if otpkID != nil {
+		otpk, ok := ps.OneTimePreKeys[*otpkID]
+		if !ok {
+			return nil, fmt.Errorf("one-time prekey with id %d not found", *otpkID)
+		}
+		bundle.otpkID = otpkID
+		bundle.otpk = otpk.pk
+		bundle.otpkSig = otpk.pksig
+	}
+
+	if encapID.Equals(ps.lastResortKEMid) {
+		bundle.encapSig = ps.lastResortSig
+		bundle.encapID = ps.lastResortKEMid
+		bundle.encap = ps.lastResortKEMencap
+	} else if k, ok := ps.OneTimeKEMKeys[encapID]; ok {
+		bundle.encapSig = k.encapSig
+		bundle.encap = k.encap
+		bundle.encapID = encapID
+	} else {
+		return nil, fmt.Errorf("MLKEM not found for KEM id %x", encapID)
+	}
+
+	return bundle, nil
 }
 
 // MakeBundle constructs a given bundle from a pqxdh state. It can be used for both testing and then
@@ -443,7 +479,7 @@ func (ps *State) MakeBundle(encapID KEMID, encap *mlkem.EncapsulationKey1024, ot
 	// choose correct stored signature
 	if encapID.Equals(ps.lastResortKEMid) {
 		bundle.encapSig = ps.lastResortSig
-	} else if k, ok := ps.oneTimeKEMKeys[encapID]; ok {
+	} else if k, ok := ps.OneTimeKEMKeys[encapID]; ok {
 		bundle.encapSig = k.encapSig
 	} else {
 		return nil, fmt.Errorf("no stored signature for KEM id %x", encapID)
@@ -516,7 +552,7 @@ func (ps *State) additionalDataAsInitiator(bundle *Bundle) []byte {
 	ad = append(ad, bundle.idpk.Bytes()...)    // IK_B
 
 	ad = append(ad, bundle.encap.Bytes()...) // PQPK_B
-	ad = append(ad, bundle.bundleHash...)
+	ad = append(ad, bundle.BundleHash...)
 	return ad
 }
 
@@ -554,7 +590,7 @@ func (ps *State) KeyExchange(bundle *Bundle) ([]byte, *InitMessage, error) {
 		return nil, nil, fmt.Errorf("bundle hash compute failed: %w", err)
 	}
 
-	if !bytes.Equal(bhash, bundle.bundleHash) {
+	if !bytes.Equal(bhash, bundle.BundleHash) {
 		return nil, nil, errors.New("bundle hash not okay")
 	}
 
@@ -761,10 +797,10 @@ func (ps *State) consumeKEMIfOneTime(id KEMID) {
 		return
 	}
 
-	if k, ok := ps.oneTimeKEMKeys[id]; ok {
+	if k, ok := ps.OneTimeKEMKeys[id]; ok {
 		now := time.Now().Unix()
 		k.usedAt = &now
-		delete(ps.oneTimeKEMKeys, id)
+		delete(ps.OneTimeKEMKeys, id)
 	}
 }
 
@@ -773,9 +809,9 @@ func (ps *State) consumeOTPKIfUsed(id *uint32) {
 		return
 	}
 
-	if k, ok := ps.oneTimePrekeys[*id]; ok {
+	if k, ok := ps.OneTimePreKeys[*id]; ok {
 		now := time.Now().Unix()
 		k.usedAt = &now
-		delete(ps.oneTimePrekeys, *id)
+		delete(ps.OneTimePreKeys, *id)
 	}
 }
