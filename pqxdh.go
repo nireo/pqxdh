@@ -68,15 +68,15 @@ func decodeTLV(b []byte) (tag byte, val []byte, rest []byte, err error) {
 	return
 }
 
-func encodeEC(pk *ecdh.PublicKey) []byte {
+func EncodeEC(pk *ecdh.PublicKey) []byte {
 	return encodeTLV(tagECx25519, pk.Bytes())
 }
 
-func encodeKEM1024(pk *mlkem.EncapsulationKey1024) []byte {
+func EncodeKEM1024(pk *mlkem.EncapsulationKey1024) []byte {
 	return encodeTLV(tagMLKEM1024Pub, pk.Bytes())
 }
 
-func decodeECX25519(b []byte) (*ecdh.PublicKey, error) {
+func DecodeECX25519(b []byte) (*ecdh.PublicKey, error) {
 	tag, val, rest, err := decodeTLV(b)
 	if err != nil {
 		return nil, err
@@ -97,7 +97,7 @@ func decodeECX25519(b []byte) (*ecdh.PublicKey, error) {
 	return pk, nil
 }
 
-func decodeKEM1024(b []byte) (*mlkem.EncapsulationKey1024, error) {
+func DecodeKEM1024(b []byte) (*mlkem.EncapsulationKey1024, error) {
 	tag, val, rest, err := decodeTLV(b)
 	if err != nil {
 		return nil, err

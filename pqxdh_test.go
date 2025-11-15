@@ -43,14 +43,14 @@ func TestBundleHashAndSignatures(t *testing.T) {
 	}
 	var kemID KEMID
 	var encap *mlkem.EncapsulationKey1024
-	for id, k := range receiver.oneTimeKEMKeys {
+	for id, k := range receiver.OneTimeKEMKeys {
 		kemID = id
 		encap = k.encap
 		break
 	}
 	var otpkID uint32
 	var otpk *OneTimePrekey
-	for id, k := range receiver.oneTimePrekeys {
+	for id, k := range receiver.OneTimePreKeys {
 		otpkID = id
 		otpk = k
 		break
@@ -63,7 +63,7 @@ func TestBundleHashAndSignatures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
-	b.bundleHash = h
+	b.BundleHash = h
 	ok, err := b.IsHashValid()
 	if err != nil {
 		t.Fatalf("isHashValid err: %v", err)
@@ -97,14 +97,14 @@ func TestKeyExchangeWithOneTimeKeys(t *testing.T) {
 	}
 	var kemID KEMID
 	var encap *mlkem.EncapsulationKey1024
-	for id, k := range bob.oneTimeKEMKeys {
+	for id, k := range bob.OneTimeKEMKeys {
 		kemID = id
 		encap = k.encap
 		break
 	}
 	var otpkID uint32
 	var otpk *OneTimePrekey
-	for id, k := range bob.oneTimePrekeys {
+	for id, k := range bob.OneTimePreKeys {
 		otpkID = id
 		otpk = k
 		break
@@ -117,7 +117,7 @@ func TestKeyExchangeWithOneTimeKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bundle hash: %v", err)
 	}
-	bundle.bundleHash = h
+	bundle.BundleHash = h
 	rkA, init, err := alice.KeyExchange(bundle)
 	if err != nil {
 		t.Fatalf("alice.keyExchange: %v", err)
@@ -132,10 +132,10 @@ func TestKeyExchangeWithOneTimeKeys(t *testing.T) {
 	if !bytes.Equal(init.ad, res.AD) {
 		t.Fatalf("additional data differ")
 	}
-	if _, ok := bob.oneTimeKEMKeys[kemID]; ok {
+	if _, ok := bob.OneTimeKEMKeys[kemID]; ok {
 		t.Fatalf("one-time KEM not consumed")
 	}
-	if _, ok := bob.oneTimePrekeys[otpkID]; ok {
+	if _, ok := bob.OneTimePreKeys[otpkID]; ok {
 		t.Fatalf("one-time prekey not consumed")
 	}
 }
@@ -157,7 +157,7 @@ func TestKeyExchangeWithLastResortKEM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
-	bundle.bundleHash = h
+	bundle.BundleHash = h
 	rkA, init, err := alice.KeyExchange(bundle)
 	if err != nil {
 		t.Fatalf("alice.keyExchange: %v", err)
@@ -190,7 +190,7 @@ func TestKeyExchangeRejectsBadBundleHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("makeBundle: %v", err)
 	}
-	bundle.bundleHash = []byte("bad")
+	bundle.BundleHash = []byte("bad")
 	_, _, err = alice.KeyExchange(bundle)
 	if err == nil {
 		t.Fatalf("expected error for bad bundle hash")
