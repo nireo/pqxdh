@@ -6,6 +6,12 @@ The only downside of this approach is that the users need some other channel to 
 
 The PQXDH is built on top of X3DH, however it adds one-time MLKEM keys and a last resort key MLKEM key. If one were to strip that out, this library then contains a fully feature X3DH implementation.
 
+## How to integrate a server
+
+In this protocol the server is responsible for storing the necessary information to construct bundles and storing one-time prekeys and MLKEM keys. This could be done by storing each key of the user and allowing keys that should be changed to be updated. 
+
+When Alice wants to talk to Bob the server picks some one-time keys (if available) based on their ids. Basically this is equal to calling the `state.MakeBundle` to construct a bundle that Alice will consume. Once the initial message is constructed the server is responsible for transferring the initial message to Bob. After that something like the Double Ratchet algorithm should be implemented to continue messaging. 
+
 ## Examples
 
 Basic key exchange:

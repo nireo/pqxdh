@@ -45,7 +45,7 @@ func TestBundleHashAndSignatures(t *testing.T) {
 	var encap *mlkem.EncapsulationKey1024
 	for id, k := range receiver.OneTimeKEMKeys {
 		kemID = id
-		encap = k.encap
+		encap = k.Encap
 		break
 	}
 	var otpkID uint32
@@ -74,7 +74,7 @@ func TestBundleHashAndSignatures(t *testing.T) {
 	if err := b.VerifyBundleSignatures(); err != nil {
 		t.Fatalf("verifyBundleSignatures: %v", err)
 	}
-	b.spkSig[0] ^= 1
+	b.SignedPrekeySig[0] ^= 1
 	if err := b.VerifyBundleSignatures(); err == nil {
 		t.Fatalf("expected signature error")
 	}
@@ -99,7 +99,7 @@ func TestKeyExchangeWithOneTimeKeys(t *testing.T) {
 	var encap *mlkem.EncapsulationKey1024
 	for id, k := range bob.OneTimeKEMKeys {
 		kemID = id
-		encap = k.encap
+		encap = k.Encap
 		break
 	}
 	var otpkID uint32
@@ -129,7 +129,7 @@ func TestKeyExchangeWithOneTimeKeys(t *testing.T) {
 	if !bytes.Equal(rkA, res.RootKey) {
 		t.Fatalf("root keys differ")
 	}
-	if !bytes.Equal(init.ad, res.AD) {
+	if !bytes.Equal(init.AD, res.AD) {
 		t.Fatalf("additional data differ")
 	}
 	if _, ok := bob.OneTimeKEMKeys[kemID]; ok {
@@ -149,7 +149,7 @@ func TestKeyExchangeWithLastResortKEM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPQXDHState bob: %v", err)
 	}
-	bundle, err := bob.MakeBundle(bob.lastResortKEMid, bob.lastResortKEMencap, nil, nil)
+	bundle, err := bob.MakeBundle(bob.LastResortKEMid, bob.LastResortKEMencap, nil, nil)
 	if err != nil {
 		t.Fatalf("makeBundle: %v", err)
 	}
@@ -169,10 +169,10 @@ func TestKeyExchangeWithLastResortKEM(t *testing.T) {
 	if !bytes.Equal(rkA, res.RootKey) {
 		t.Fatalf("root keys differ")
 	}
-	if !bytes.Equal(init.ad, res.AD) {
+	if !bytes.Equal(init.AD, res.AD) {
 		t.Fatalf("additional data differ")
 	}
-	if !bob.lastResortKEMid.Equals(init.targetEncapID) {
+	if !bob.LastResortKEMid.Equals(init.TargetEncapID) {
 		t.Fatalf("wrong KEM id used")
 	}
 }
@@ -186,7 +186,7 @@ func TestKeyExchangeRejectsBadBundleHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPQXDHState bob: %v", err)
 	}
-	bundle, err := bob.MakeBundle(bob.lastResortKEMid, bob.lastResortKEMencap, nil, nil)
+	bundle, err := bob.MakeBundle(bob.LastResortKEMid, bob.LastResortKEMencap, nil, nil)
 	if err != nil {
 		t.Fatalf("makeBundle: %v", err)
 	}

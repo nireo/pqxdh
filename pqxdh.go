@@ -25,16 +25,25 @@ import (
 // PQXDHVersion has a version for backwards compatibility and proper versioning
 type PQXDHVersion uint8
 
-var curve = ecdh.X25519()
+var defaultCurve = ecdh.X25519()
 
 const (
-	protocolInfo = "PCH_CURVE25519_SHA-512_CRYSTALS-KYBER-1024"
+	protocolInfo = "PCH_CURVE25519_SHA-512_MLKEM-1024"
 
 	tagECx25519     byte = 0x01
 	tagMLKEM1024Pub byte = 0xA3
+	tagMLKEM768Pub  byte = 0xA4
 
 	pqxdhV1 PQXDHVersion = 1
 )
+
+func constructInfo(kemType KEMType) string {
+	if kemType == KEM1024 {
+		return "PCH_CURVE25519_SHA-512_MLKEM-1024"
+	} else {
+		return "PCH_CURVE25519_SHA-512_MLKEM-768"
+	}
+}
 
 var (
 	ErrTLVTruncated  = errors.New("truncated TLV")
@@ -47,10 +56,12 @@ func encodeTLV(tag byte, v []byte) []byte {
 	if len(v) > 0xFFFF {
 		panic("value too large for 2-byte length")
 	}
+
 	out := make([]byte, 1+2+len(v))
 	out[0] = tag
-	binary.BigEndian.PutUint16(out[1:3], uint16(len(v)))
+	binary.LittleEndian.PutUint16(out[1:3], uint16(len(v)))
 	copy(out[3:], v)
+
 	return out
 }
 
@@ -59,10 +70,11 @@ func decodeTLV(b []byte) (tag byte, val []byte, rest []byte, err error) {
 		return 0, nil, nil, ErrTLVTruncated
 	}
 	tag = b[0]
-	n := int(binary.BigEndian.Uint16(b[1:3]))
+	n := int(binary.LittleEndian.Uint16(b[1:3]))
 	if len(b) < 3+n {
 		return 0, nil, nil, ErrTLVLenOverrun
 	}
+
 	val = b[3 : 3+n]
 	rest = b[3+n:]
 	return
@@ -81,19 +93,24 @@ func DecodeECX25519(b []byte) (*ecdh.PublicKey, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if len(rest) != 0 {
 		return nil, ErrTLVTrailing
 	}
+
 	if tag != tagECx25519 {
 		return nil, fmt.Errorf("%w: got 0x%02x want 0x%02x", ErrBadTag, tag, tagECx25519)
 	}
+
 	if len(val) != 32 {
 		return nil, fmt.Errorf("bad X25519 public key length: got %d want 32", len(val))
 	}
+
 	pk, err := ecdh.X25519().NewPublicKey(val)
 	if err != nil {
 		return nil, fmt.Errorf("X25519 NewPublicKey: %w", err)
 	}
+
 	return pk, nil
 }
 
@@ -102,28 +119,34 @@ func DecodeKEM1024(b []byte) (*mlkem.EncapsulationKey1024, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if len(rest) != 0 {
 		return nil, ErrTLVTrailing
 	}
+
 	if tag != tagMLKEM1024Pub {
 		return nil, fmt.Errorf("%w: got 0x%02x want 0x%02x", ErrBadTag, tag, tagMLKEM1024Pub)
 	}
+
 	if len(val) != mlkem.EncapsulationKeySize1024 {
 		return nil, fmt.Errorf(
 			"bad ML-KEM-1024 public key length: got %d want %d",
 			len(val), mlkem.EncapsulationKeySize1024,
 		)
 	}
+
 	pk, err := mlkem.NewEncapsulationKey1024(val)
 	if err != nil {
 		return nil, fmt.Errorf("ML-KEM NewEncapsulationKey1024: %w", err)
 	}
+
 	return pk, nil
 }
 
 // KEMID is a server-addressable id for a KEM key
 type KEMID [16]byte
 
+// Equals checks if a given kemID is equivalent to this
 func (id KEMID) Equals(other KEMID) bool {
 	return bytes.Equal(id[:], other[:])
 }
@@ -132,12 +155,12 @@ func (id KEMID) Equals(other KEMID) bool {
 // the user however has a last-resort mlkem key such that the post-quantum security is preserved
 type OneTimeKEMKey struct {
 	// mlkem keys
-	decap *mlkem.DecapsulationKey1024
-	encap *mlkem.EncapsulationKey1024
+	Decap *mlkem.DecapsulationKey1024
+	Encap *mlkem.EncapsulationKey1024
 
-	encapSig  []byte
-	createdAt int64
-	usedAt    *int64
+	EncapSig  []byte
+	CreatedAt int64
+	UsedAt    *int64
 }
 
 // OneTimePrekey are elliptic curve keys that should be used (if available) for each pqxdh run.
@@ -145,55 +168,54 @@ type OneTimeKEMKey struct {
 // uses the private key in their key exchange and the iniator uses the public key when initiating
 // the key exhange.
 type OneTimePrekey struct {
-	sk *ecdh.PrivateKey
-	pk *ecdh.PublicKey
+	SK *ecdh.PrivateKey
+	PK *ecdh.PublicKey
 
-	pksig []byte
-	// metadata
-	createdAt int64
-	usedAt    *int64
+	PKSig     []byte
+	CreatedAt int64
+	UsedAt    *int64
 }
 
 // Identity contains the identity for a given local user. The identity keys should stay the same
 type Identity struct {
 	// identity static DH (X25519)
-	pk *ecdh.PublicKey
-	sk *ecdh.PrivateKey
+	PK *ecdh.PublicKey
+	SK *ecdh.PrivateKey
 
 	// a XEdDSA verification key derived from the sk and only user for ed25519 verify.
-	signingPub ed25519.PublicKey
+	SigningPub ed25519.PublicKey
 }
 
 // Bundle contains all of the information needed for the iniator to begin key exhange. all of the
 // information in this struct is public meaning that in real usage this is populated by a server.
 type Bundle struct {
-	signingPub ed25519.PublicKey
-	encap      *mlkem.EncapsulationKey1024 // public KEM key (either last-resort or one-time use)
-	encapSig   []byte                      // signed by Bob’s identity signing key
-	encapID    KEMID                       // id to reference in init
+	SigningPub ed25519.PublicKey
+	Encap      *mlkem.EncapsulationKey1024 // public KEM key (either last-resort or one-time use)
+	EncapSig   []byte                      // signed by Bob’s identity signing key
+	EncapID    KEMID                       // id to reference in init
 
 	// classical one-time (optional; server deletes after handing out)
-	otpkID  *uint32
-	otpk    *ecdh.PublicKey // optional public X25519 key
-	otpkSig []byte
+	OTPKID  *uint32
+	OTPK    *ecdh.PublicKey // optional public X25519 key
+	OTPKSig []byte
 
-	idpk   *ecdh.PublicKey // identity key
-	spkpk  *ecdh.PublicKey // signed prekey
-	spkSig []byte          // identity key signature of signed prekey
+	IdentityPK      *ecdh.PublicKey // identity key
+	SignedPrekeyPK  *ecdh.PublicKey // signed prekey
+	SignedPrekeySig []byte          // identity key signature of signed prekey
 
-	version    PQXDHVersion
+	Version    PQXDHVersion
 	BundleHash []byte
 }
 
 // State represents a user in pqxdh a user can initiate a key exchange or it accept key exchange
 // requests to create a shared secret. this struct constains private key which should obviously kept secret.
 type State struct {
-	identity Identity
+	Identity Identity
 
 	// classical signed prekey
-	signedPrekeySK  *ecdh.PrivateKey
-	signedPrekeyPK  *ecdh.PublicKey
-	signedPrekeySig []byte
+	SignedPrekeySK  *ecdh.PrivateKey
+	SignedPrekeyPK  *ecdh.PublicKey
+	SignedPrekeySig []byte
 
 	// classical one-time prekeys (many; keyed by server-visible id)
 	OneTimePreKeys map[uint32]*OneTimePrekey
@@ -202,36 +224,36 @@ type State struct {
 	OneTimeKEMKeys map[KEMID]*OneTimeKEMKey
 
 	// PQ signed prekey (last resort) secret half lives locally
-	lastResortKEMdecap *mlkem.DecapsulationKey1024
-	lastResortKEMencap *mlkem.EncapsulationKey1024
-	lastResortKEMid    KEMID
-	lastResortSig      []byte
+	LastResortKEMdecap *mlkem.DecapsulationKey1024
+	LastResortKEMencap *mlkem.EncapsulationKey1024
+	LastResortKEMid    KEMID
+	LastResortSig      []byte
 
-	version   PQXDHVersion
-	createdAt int64
+	Version   PQXDHVersion
+	CreatedAt int64
 }
 
 type InitMessage struct {
-	bundleHash []byte
-	ad         []byte
+	BundleHash []byte
+	AD         []byte
 
-	idpk          *ecdh.PublicKey
-	ephKey        *ecdh.PublicKey
-	otpkUsedID    *uint32
-	targetEncapID KEMID
-	encapCT       []byte
+	IdentityPK    *ecdh.PublicKey
+	EphemeralPK   *ecdh.PublicKey
+	OTPKUsedID    *uint32
+	TargetEncapID KEMID
+	EncapCT       []byte
 
-	payload []byte
+	Payload []byte
 }
 
 // NewPQXDHState constructs a PQXDH state by generating needed keys
 func NewPQXDHState() (*State, error) {
-	ikSK, err := curve.GenerateKey(rand.Reader)
+	ikSK, err := defaultCurve.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
 
-	spkSK, err := curve.GenerateKey(rand.Reader)
+	spkSK, err := defaultCurve.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
@@ -257,22 +279,22 @@ func NewPQXDHState() (*State, error) {
 	}
 
 	return &State{
-		identity: Identity{
-			signingPub: ed25519.PublicKey(A),
-			pk:         ikSK.PublicKey(),
-			sk:         ikSK,
+		Identity: Identity{
+			SigningPub: ed25519.PublicKey(A),
+			PK:         ikSK.PublicKey(),
+			SK:         ikSK,
 		},
-		signedPrekeySK:     spkSK,
-		signedPrekeyPK:     spkSK.PublicKey(),
-		signedPrekeySig:    spkSig,
+		SignedPrekeySK:     spkSK,
+		SignedPrekeyPK:     spkSK.PublicKey(),
+		SignedPrekeySig:    spkSig,
 		OneTimePreKeys:     make(map[uint32]*OneTimePrekey),
 		OneTimeKEMKeys:     make(map[KEMID]*OneTimeKEMKey),
-		lastResortKEMdecap: decap,
-		lastResortKEMencap: decap.EncapsulationKey(),
-		lastResortKEMid:    kemID,
-		lastResortSig:      lastResortSig,
-		version:            pqxdhV1,
-		createdAt:          time.Now().Unix(),
+		LastResortKEMdecap: decap,
+		LastResortKEMencap: decap.EncapsulationKey(),
+		LastResortKEMid:    kemID,
+		LastResortSig:      lastResortSig,
+		Version:            pqxdhV1,
+		CreatedAt:          time.Now().Unix(),
 	}, nil
 }
 
@@ -294,17 +316,17 @@ func (ps *State) GenerateOneTimeKEMKeys(n int) error {
 			return err
 		}
 
-		encapSig, _, err := Sign(ps.identity.sk, encap.Bytes())
+		encapSig, _, err := Sign(ps.Identity.SK, encap.Bytes())
 		if err != nil {
 			return fmt.Errorf("failed to sign encapsulation key: %w", err)
 		}
 
 		ps.OneTimeKEMKeys[id] = &OneTimeKEMKey{
-			decap:     decap,
-			encap:     encap,
-			encapSig:  encapSig,
-			createdAt: time.Now().Unix(),
-			usedAt:    nil,
+			Decap:     decap,
+			Encap:     encap,
+			EncapSig:  encapSig,
+			CreatedAt: time.Now().Unix(),
+			UsedAt:    nil,
 		}
 	}
 
@@ -325,7 +347,7 @@ func randomUint32() (uint32, error) {
 // be sent to the server.
 func (ps *State) GenerateOneTimePrekeys(n int) error {
 	for range n {
-		otpPriv, err := curve.GenerateKey(rand.Reader)
+		otpPriv, err := defaultCurve.GenerateKey(rand.Reader)
 		if err != nil {
 			return fmt.Errorf("failed to generate otp: %w", err)
 		}
@@ -337,7 +359,7 @@ func (ps *State) GenerateOneTimePrekeys(n int) error {
 			return err
 		}
 
-		pksig, _, err := Sign(ps.identity.sk, pk.Bytes())
+		pksig, _, err := Sign(ps.Identity.SK, pk.Bytes())
 		if err != nil {
 			return fmt.Errorf("failed to sign encapsulation key: %w", err)
 		}
@@ -345,11 +367,11 @@ func (ps *State) GenerateOneTimePrekeys(n int) error {
 		// the private key needs to stored in-case the process actually uses the one-time public key such that
 		// we can perform the key exchange on the receiver end.
 		ps.OneTimePreKeys[id] = &OneTimePrekey{
-			sk:        otpPriv,
-			pk:        pk,
-			pksig:     pksig,
-			createdAt: time.Now().Unix(),
-			usedAt:    nil,
+			SK:        otpPriv,
+			PK:        pk,
+			PKSig:     pksig,
+			CreatedAt: time.Now().Unix(),
+			UsedAt:    nil,
 		}
 	}
 
@@ -370,23 +392,23 @@ func (b *Bundle) IsHashValid() (bool, error) {
 func (b *Bundle) Hash() ([]byte, error) {
 	h := sha512.New()
 
-	if b.encap == nil || b.idpk == nil || b.spkpk == nil {
+	if b.Encap == nil || b.IdentityPK == nil || b.SignedPrekeyPK == nil {
 		return nil, errors.New("required fields are nil for hashing")
 	}
 
-	h.Write([]byte{byte(b.version)})
-	h.Write(b.idpk.Bytes())
+	h.Write([]byte{byte(b.Version)})
+	h.Write(b.IdentityPK.Bytes())
 
-	h.Write(b.spkpk.Bytes())
-	h.Write(b.spkSig)
+	h.Write(b.SignedPrekeyPK.Bytes())
+	h.Write(b.SignedPrekeySig)
 
-	h.Write(b.encap.Bytes())
-	h.Write(b.encapID[:])
-	h.Write(b.encapSig)
+	h.Write(b.Encap.Bytes())
+	h.Write(b.EncapID[:])
+	h.Write(b.EncapSig)
 
-	if b.otpk != nil {
-		h.Write(b.otpk.Bytes())
-		h.Write(b.otpkSig)
+	if b.OTPK != nil {
+		h.Write(b.OTPK.Bytes())
+		h.Write(b.OTPKSig)
 	}
 
 	return h.Sum(nil), nil
@@ -395,12 +417,12 @@ func (b *Bundle) Hash() ([]byte, error) {
 // findMLKEM finds for a given id the MLKEM key. it also checks the last resort kem key otherwise defaulting to the
 // one time kem keys. it returns an error only when nothing is found.
 func (ps *State) findMLKEM(id KEMID) (*mlkem.DecapsulationKey1024, *mlkem.EncapsulationKey1024, error) {
-	if id.Equals(ps.lastResortKEMid) {
-		return ps.lastResortKEMdecap, ps.lastResortKEMencap, nil
+	if id.Equals(ps.LastResortKEMid) {
+		return ps.LastResortKEMdecap, ps.LastResortKEMencap, nil
 	}
 
 	if kp, ok := ps.OneTimeKEMKeys[id]; ok {
-		return kp.decap, kp.encap, nil
+		return kp.Decap, kp.Encap, nil
 	} else {
 		return nil, nil, fmt.Errorf("kem key not found with id: %x", id)
 	}
@@ -419,11 +441,11 @@ func (ps *State) findOtpk(id uint32) (*OneTimePrekey, error) {
 // to make the exposed API cleaner.
 func (ps *State) MakeBundleWithIDs(encapID KEMID, otpkID *uint32) (*Bundle, error) {
 	bundle := &Bundle{
-		signingPub: ps.identity.signingPub,
-		idpk:       ps.identity.pk,
-		spkpk:      ps.signedPrekeyPK,
-		spkSig:     ps.signedPrekeySig,
-		version:    pqxdhV1,
+		SigningPub:      ps.Identity.SigningPub,
+		IdentityPK:      ps.Identity.PK,
+		SignedPrekeyPK:  ps.SignedPrekeyPK,
+		SignedPrekeySig: ps.SignedPrekeySig,
+		Version:         pqxdhV1,
 	}
 
 	if otpkID != nil {
@@ -431,19 +453,19 @@ func (ps *State) MakeBundleWithIDs(encapID KEMID, otpkID *uint32) (*Bundle, erro
 		if !ok {
 			return nil, fmt.Errorf("one-time prekey with id %d not found", *otpkID)
 		}
-		bundle.otpkID = otpkID
-		bundle.otpk = otpk.pk
-		bundle.otpkSig = otpk.pksig
+		bundle.OTPKID = otpkID
+		bundle.OTPK = otpk.PK
+		bundle.OTPKSig = otpk.PKSig
 	}
 
-	if encapID.Equals(ps.lastResortKEMid) {
-		bundle.encapSig = ps.lastResortSig
-		bundle.encapID = ps.lastResortKEMid
-		bundle.encap = ps.lastResortKEMencap
+	if encapID.Equals(ps.LastResortKEMid) {
+		bundle.EncapSig = ps.LastResortSig
+		bundle.EncapID = ps.LastResortKEMid
+		bundle.Encap = ps.LastResortKEMencap
 	} else if k, ok := ps.OneTimeKEMKeys[encapID]; ok {
-		bundle.encapSig = k.encapSig
-		bundle.encap = k.encap
-		bundle.encapID = encapID
+		bundle.EncapSig = k.EncapSig
+		bundle.Encap = k.Encap
+		bundle.EncapID = encapID
 	} else {
 		return nil, fmt.Errorf("MLKEM not found for KEM id %x", encapID)
 	}
@@ -456,31 +478,31 @@ func (ps *State) MakeBundleWithIDs(encapID KEMID, otpkID *uint32) (*Bundle, erro
 // return is when either kemID or otpkID are not found.
 func (ps *State) MakeBundle(encapID KEMID, encap *mlkem.EncapsulationKey1024, otpkID *uint32, otpk *OneTimePrekey) (*Bundle, error) {
 	bundle := &Bundle{
-		signingPub: ps.identity.signingPub,
-		idpk:       ps.identity.pk,
-		spkpk:      ps.signedPrekeyPK,
-		spkSig:     ps.signedPrekeySig,
-		version:    pqxdhV1,
+		SigningPub:      ps.Identity.SigningPub,
+		IdentityPK:      ps.Identity.PK,
+		SignedPrekeyPK:  ps.SignedPrekeyPK,
+		SignedPrekeySig: ps.SignedPrekeySig,
+		Version:         pqxdhV1,
 	}
 
 	if otpkID != nil && otpk != nil {
-		bundle.otpkID = otpkID
-		bundle.otpk = otpk.pk
-		bundle.otpkSig = otpk.pksig
+		bundle.OTPKID = otpkID
+		bundle.OTPK = otpk.PK
+		bundle.OTPKSig = otpk.PKSig
 	}
 
 	if encap == nil {
 		return nil, errors.New("encapsulation key is nil")
 	}
 
-	bundle.encap = encap
-	bundle.encapID = encapID
+	bundle.Encap = encap
+	bundle.EncapID = encapID
 
 	// choose correct stored signature
-	if encapID.Equals(ps.lastResortKEMid) {
-		bundle.encapSig = ps.lastResortSig
+	if encapID.Equals(ps.LastResortKEMid) {
+		bundle.EncapSig = ps.LastResortSig
 	} else if k, ok := ps.OneTimeKEMKeys[encapID]; ok {
-		bundle.encapSig = k.encapSig
+		bundle.EncapSig = k.EncapSig
 	} else {
 		return nil, fmt.Errorf("no stored signature for KEM id %x", encapID)
 	}
@@ -512,30 +534,30 @@ func (b *Bundle) VerifyBundleSignatures() error {
 		return errors.New("nil bundle")
 	}
 
-	if b.signingPub == nil || len(b.signingPub) != ed25519.PublicKeySize {
+	if b.SigningPub == nil || len(b.SigningPub) != ed25519.PublicKeySize {
 		return errors.New("missing or bad signingPub")
 	}
 
-	if b.spkpk == nil || len(b.spkSig) != ed25519.SignatureSize {
+	if b.SignedPrekeyPK == nil || len(b.SignedPrekeySig) != ed25519.SignatureSize {
 		return errors.New("missing signed-prekey or signature")
 	}
 
-	if !ed25519.Verify(b.signingPub, b.spkpk.Bytes(), b.spkSig) {
+	if !ed25519.Verify(b.SigningPub, b.SignedPrekeyPK.Bytes(), b.SignedPrekeySig) {
 		return errors.New("invalid signature on signed-prekey")
 	}
 
-	if b.encap == nil || len(b.encapSig) != ed25519.SignatureSize {
+	if b.Encap == nil || len(b.EncapSig) != ed25519.SignatureSize {
 		return errors.New("missing ML-KEM key or signature")
 	}
-	if !ed25519.Verify(b.signingPub, b.encap.Bytes(), b.encapSig) {
+	if !ed25519.Verify(b.SigningPub, b.Encap.Bytes(), b.EncapSig) {
 		return errors.New("invalid signature on ML-KEM key")
 	}
 
-	if b.otpk != nil {
-		if len(b.otpkSig) != ed25519.SignatureSize {
+	if b.OTPK != nil {
+		if len(b.OTPKSig) != ed25519.SignatureSize {
 			return errors.New("missing one-time prekey signature")
 		}
-		if !ed25519.Verify(b.signingPub, b.otpk.Bytes(), b.otpkSig) {
+		if !ed25519.Verify(b.SigningPub, b.OTPK.Bytes(), b.OTPKSig) {
 			return errors.New("invalid signature on one-time prekey")
 		}
 	}
@@ -548,10 +570,10 @@ func (b *Bundle) VerifyBundleSignatures() error {
 // both parties have the same additional data.
 func (ps *State) additionalDataAsInitiator(bundle *Bundle) []byte {
 	ad := make([]byte, 0, 32*2+mlkem.EncapsulationKeySize1024)
-	ad = append(ad, ps.identity.pk.Bytes()...) // IK_A
-	ad = append(ad, bundle.idpk.Bytes()...)    // IK_B
+	ad = append(ad, ps.Identity.PK.Bytes()...)    // IK_A
+	ad = append(ad, bundle.IdentityPK.Bytes()...) // IK_B
 
-	ad = append(ad, bundle.encap.Bytes()...) // PQPK_B
+	ad = append(ad, bundle.Encap.Bytes()...) // PQPK_B
 	ad = append(ad, bundle.BundleHash...)
 	return ad
 }
@@ -565,7 +587,7 @@ func (ps *State) additionalDataAsReceiver(
 ) []byte {
 	ad := make([]byte, 0, 32*2+mlkem.EncapsulationKeySize1024+len(bundleHash))
 	ad = append(ad, idpk.Bytes()...)           // IK_A
-	ad = append(ad, ps.identity.pk.Bytes()...) // IK_B
+	ad = append(ad, ps.Identity.PK.Bytes()...) // IK_B
 	ad = append(ad, encap.Bytes()...)          // PQPK_B
 	ad = append(ad, bundleHash...)
 
@@ -581,7 +603,7 @@ func (ps *State) KeyExchange(bundle *Bundle) ([]byte, *InitMessage, error) {
 	if bundle == nil {
 		return nil, nil, errors.New("nil bundle")
 	}
-	if bundle.idpk == nil || bundle.spkpk == nil || bundle.encap == nil {
+	if bundle.IdentityPK == nil || bundle.SignedPrekeyPK == nil || bundle.Encap == nil {
 		return nil, nil, errors.New("bundle missing required keys")
 	}
 
@@ -600,39 +622,39 @@ func (ps *State) KeyExchange(bundle *Bundle) ([]byte, *InitMessage, error) {
 	}
 
 	// DH1 = IK_A x SPK_B
-	dh1, err := ps.identity.sk.ECDH(bundle.spkpk)
+	dh1, err := ps.Identity.SK.ECDH(bundle.SignedPrekeyPK)
 	if err != nil {
 		return nil, nil, fmt.Errorf("DH1 (IK_AxSPK_B) failed: %w", err)
 	}
 
 	// generate the ephemeral key only used for this session
-	ephPriv, err := curve.GenerateKey(rand.Reader)
+	ephPriv, err := defaultCurve.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ephemeral key gen failed: %w", err)
 	}
 
 	// DH2 = EK_A x IK_B
-	dh2, err := ephPriv.ECDH(bundle.idpk)
+	dh2, err := ephPriv.ECDH(bundle.IdentityPK)
 	if err != nil {
 		return nil, nil, fmt.Errorf("DH2 (EK_AxIK_B) failed: %w", err)
 	}
 
 	// DH3 = EK_A x SPK_B
-	dh3, err := ephPriv.ECDH(bundle.spkpk)
+	dh3, err := ephPriv.ECDH(bundle.SignedPrekeyPK)
 	if err != nil {
 		return nil, nil, fmt.Errorf("DH3 (EK_AxSPK_B) failed: %w", err)
 	}
 
 	// Optional DH4 = EK_A x OPK_B
 	var dh4 []byte
-	if bundle.otpk != nil {
-		dh4, err = ephPriv.ECDH(bundle.otpk)
+	if bundle.OTPK != nil {
+		dh4, err = ephPriv.ECDH(bundle.OTPK)
 		if err != nil {
 			return nil, nil, fmt.Errorf("DH4 (EK_AxOPK_B) failed: %w", err)
 		}
 	}
 
-	pqSS, ct := bundle.encap.Encapsulate()
+	pqSS, ct := bundle.Encap.Encapsulate()
 
 	var km []byte
 	km = append(km, dh1...)
@@ -650,16 +672,16 @@ func (ps *State) KeyExchange(bundle *Bundle) ([]byte, *InitMessage, error) {
 
 	initContent := &InitMessage{
 		// hash of the bundle that alice used to derive the shared secret
-		bundleHash:    bhash,
-		ad:            ps.additionalDataAsInitiator(bundle),
-		idpk:          ps.identity.pk,
-		targetEncapID: bundle.encapID,
-		encapCT:       ct,
-		ephKey:        ephPriv.PublicKey(),
+		BundleHash:    bhash,
+		AD:            ps.additionalDataAsInitiator(bundle),
+		IdentityPK:    ps.Identity.PK,
+		TargetEncapID: bundle.EncapID,
+		EncapCT:       ct,
+		EphemeralPK:   ephPriv.PublicKey(),
 	}
 
-	if bundle.otpkID != nil && bundle.otpk != nil {
-		initContent.otpkUsedID = bundle.otpkID
+	if bundle.OTPKID != nil && bundle.OTPK != nil {
+		initContent.OTPKUsedID = bundle.OTPKID
 	}
 
 	return rootKey, initContent, nil
@@ -708,26 +730,26 @@ func (ps *State) ReceiveInitMessage(init *InitMessage) (*KeyExchangeResult, erro
 		return nil, errors.New("nil init")
 	}
 
-	if init.idpk == nil || init.ephKey == nil {
+	if init.IdentityPK == nil || init.EphemeralPK == nil {
 		return nil, errors.New("init missing identity or ephemeral key")
 	}
 
 	// the function needs the decap and encap so we call it here and pass it through functions.
 	// not the cleanest approach.
 	// TODO: make the bundle checking a bit more sane.
-	decap, encap, err := ps.findMLKEM(init.targetEncapID)
+	decap, encap, err := ps.findMLKEM(init.TargetEncapID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find used KEM key: %s", err)
 	}
 
-	if len(init.encapCT) != mlkem.CiphertextSize1024 {
+	if len(init.EncapCT) != mlkem.CiphertextSize1024 {
 		return nil, fmt.Errorf("bad KEM ciphertext: got %d, want %d",
-			len(init.encapCT), mlkem.CiphertextSize1024)
+			len(init.EncapCT), mlkem.CiphertextSize1024)
 	}
 
 	var otpk *OneTimePrekey
-	if init.otpkUsedID != nil {
-		otpk, err = ps.findOtpk(*init.otpkUsedID)
+	if init.OTPKUsedID != nil {
+		otpk, err = ps.findOtpk(*init.OTPKUsedID)
 		if err != nil {
 			return nil, fmt.Errorf("one time private key used but not found: %s", err)
 		}
@@ -736,35 +758,35 @@ func (ps *State) ReceiveInitMessage(init *InitMessage) (*KeyExchangeResult, erro
 	// validate that the bundle content is correct. this obviously cannot validate the server that provided the bundle
 	// did not forge it to create a key exchange here with the receiver. the security is based on the fact that the party
 	// can through some other channel verify the authenticity of the identity key that provided the bundle.
-	bundleHash, err := ps.checkBundleAsReceiver(init.bundleHash, encap, init.targetEncapID, init.otpkUsedID, otpk)
+	bundleHash, err := ps.checkBundleAsReceiver(init.BundleHash, encap, init.TargetEncapID, init.OTPKUsedID, otpk)
 	if err != nil {
 		return nil, err
 	}
 
-	dh1, err := ps.signedPrekeySK.ECDH(init.idpk)
+	dh1, err := ps.SignedPrekeySK.ECDH(init.IdentityPK)
 	if err != nil {
 		return nil, fmt.Errorf("DH1 SPK_BxIK_A failed: %w", err)
 	}
 
-	dh2, err := ps.identity.sk.ECDH(init.ephKey)
+	dh2, err := ps.Identity.SK.ECDH(init.EphemeralPK)
 	if err != nil {
 		return nil, fmt.Errorf("DH1 IK_BxEPH failed: %w", err)
 	}
 
-	dh3, err := ps.signedPrekeySK.ECDH(init.ephKey)
+	dh3, err := ps.SignedPrekeySK.ECDH(init.EphemeralPK)
 	if err != nil {
 		return nil, fmt.Errorf("DH1 SPK_BxEPH failed: %w", err)
 	}
 
 	var dh4 []byte
 	if otpk != nil {
-		dh4, err = otpk.sk.ECDH(init.ephKey)
+		dh4, err = otpk.SK.ECDH(init.EphemeralPK)
 		if err != nil {
 			return nil, fmt.Errorf("DH1 OTPKxEPH failed: %w", err)
 		}
 	}
 
-	pqSS, err := decap.Decapsulate(init.encapCT)
+	pqSS, err := decap.Decapsulate(init.EncapCT)
 	if err != nil {
 		return nil, fmt.Errorf("kem decapsulation failed: %w", err)
 	}
@@ -783,23 +805,23 @@ func (ps *State) ReceiveInitMessage(init *InitMessage) (*KeyExchangeResult, erro
 		return nil, err
 	}
 
-	ps.consumeKEMIfOneTime(init.targetEncapID)
-	ps.consumeOTPKIfUsed(init.otpkUsedID)
+	ps.consumeKEMIfOneTime(init.TargetEncapID)
+	ps.consumeOTPKIfUsed(init.OTPKUsedID)
 
 	return &KeyExchangeResult{
 		RootKey: rootKey,
-		AD:      ps.additionalDataAsReceiver(encap, init.idpk, bundleHash),
+		AD:      ps.additionalDataAsReceiver(encap, init.IdentityPK, bundleHash),
 	}, nil
 }
 
 func (ps *State) consumeKEMIfOneTime(id KEMID) {
-	if id.Equals(ps.lastResortKEMid) {
+	if id.Equals(ps.LastResortKEMid) {
 		return
 	}
 
 	if k, ok := ps.OneTimeKEMKeys[id]; ok {
 		now := time.Now().Unix()
-		k.usedAt = &now
+		k.UsedAt = &now
 		delete(ps.OneTimeKEMKeys, id)
 	}
 }
@@ -811,7 +833,7 @@ func (ps *State) consumeOTPKIfUsed(id *uint32) {
 
 	if k, ok := ps.OneTimePreKeys[*id]; ok {
 		now := time.Now().Unix()
-		k.usedAt = &now
+		k.UsedAt = &now
 		delete(ps.OneTimePreKeys, *id)
 	}
 }
