@@ -37,14 +37,6 @@ const (
 	pqxdhV1 PQXDHVersion = 1
 )
 
-func constructInfo(kemType KEMType) string {
-	if kemType == KEM1024 {
-		return "PCH_CURVE25519_SHA-512_MLKEM-1024"
-	} else {
-		return "PCH_CURVE25519_SHA-512_MLKEM-768"
-	}
-}
-
 var (
 	ErrTLVTruncated  = errors.New("truncated TLV")
 	ErrTLVLenOverrun = errors.New("TLV length overrun")
@@ -153,6 +145,9 @@ func (id KEMID) Equals(other KEMID) bool {
 
 // OneTimeKEMKey contains a single-use KEM key that is supposed to be used only once per pqxdh run
 // the user however has a last-resort mlkem key such that the post-quantum security is preserved
+//
+// Since the XEdDSA signatures are based on a random Z we want to store the signature which is then
+// used to reconstruct the bundle hash.
 type OneTimeKEMKey struct {
 	// mlkem keys
 	Decap *mlkem.DecapsulationKey1024
@@ -160,20 +155,23 @@ type OneTimeKEMKey struct {
 
 	EncapSig  []byte
 	CreatedAt int64
-	UsedAt    *int64
+	UsedAt    *time.Time
 }
 
 // OneTimePrekey are elliptic curve keys that should be used (if available) for each pqxdh run.
 // similar to the one time kem keys they should only be used one and then discarded. the receiver
 // uses the private key in their key exchange and the iniator uses the public key when initiating
 // the key exhange.
+//
+// Since the XEdDSA signatures are based on a random Z we want to store the signature which is then
+// used to reconstruct the bundle hash.
 type OneTimePrekey struct {
 	SK *ecdh.PrivateKey
 	PK *ecdh.PublicKey
 
 	PKSig     []byte
 	CreatedAt int64
-	UsedAt    *int64
+	UsedAt    *time.Time
 }
 
 // Identity contains the identity for a given local user. The identity keys should stay the same
@@ -820,20 +818,295 @@ func (ps *State) consumeKEMIfOneTime(id KEMID) {
 	}
 
 	if k, ok := ps.OneTimeKEMKeys[id]; ok {
-		now := time.Now().Unix()
+		now := time.Now()
 		k.UsedAt = &now
 		delete(ps.OneTimeKEMKeys, id)
 	}
 }
 
+// consumeOTPKIfUsed consumes a given id if it has been used. It changes the
 func (ps *State) consumeOTPKIfUsed(id *uint32) {
 	if id == nil {
 		return
 	}
 
 	if k, ok := ps.OneTimePreKeys[*id]; ok {
-		now := time.Now().Unix()
+		now := time.Now()
 		k.UsedAt = &now
 		delete(ps.OneTimePreKeys, *id)
 	}
+}
+
+// MarshalBinary implements encoding.BinaryMarshaler for Bundle.
+func (b *Bundle) MarshalBinary() ([]byte, error) {
+	if b == nil {
+		return nil, errors.New("nil bundle")
+	}
+
+	if len(b.SigningPub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("bad signingPub length: got %d want %d", len(b.SigningPub), ed25519.PublicKeySize)
+	}
+	if b.IdentityPK == nil {
+		return nil, errors.New("nil IdentityPK")
+	}
+	if b.SignedPrekeyPK == nil {
+		return nil, errors.New("nil SignedPrekeyPK")
+	}
+	if len(b.SignedPrekeySig) != ed25519.SignatureSize {
+		return nil, fmt.Errorf("bad SignedPrekeySig length: got %d want %d", len(b.SignedPrekeySig), ed25519.SignatureSize)
+	}
+	if b.Encap == nil {
+		return nil, errors.New("nil Encap")
+	}
+	if len(b.EncapSig) != ed25519.SignatureSize {
+		return nil, fmt.Errorf("bad EncapSig length: got %d want %d", len(b.EncapSig), ed25519.SignatureSize)
+	}
+
+	hasOTPK := b.OTPK != nil || b.OTPKID != nil || b.OTPKSig != nil
+	if hasOTPK {
+		if b.OTPK == nil || b.OTPKID == nil {
+			return nil, errors.New("inconsistent OTPK presence (need OTPK and OTPKID)")
+		}
+		if len(b.OTPKSig) != ed25519.SignatureSize {
+			return nil, fmt.Errorf("bad OTPKSig length: got %d want %d", len(b.OTPKSig), ed25519.SignatureSize)
+		}
+	}
+
+	if len(b.BundleHash) == 0 {
+		h, err := b.Hash()
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute bundle hash: %w", err)
+		}
+		b.BundleHash = h
+	}
+
+	// Rough capacity estimate to avoid reallocations.
+	capacity := 1 + // Version
+		ed25519.PublicKeySize + // SigningPub
+		len(b.EncapID) +
+		mlkem.EncapsulationKeySize1024 +
+		ed25519.SignatureSize + // EncapSig
+		1 + // hasOTPK flag
+		(4 + 32 + ed25519.SignatureSize) + // OTPK fields (worst case)
+		32 + // IdentityPK
+		32 + // SignedPrekeyPK
+		ed25519.SignatureSize + // SignedPrekeySig
+		2 + len(b.BundleHash) // BundleHash length + bytes
+
+	buf := bytes.NewBuffer(make([]byte, 0, capacity))
+
+	if err := buf.WriteByte(byte(b.Version)); err != nil {
+		return nil, err
+	}
+
+	if _, err := buf.Write(b.SigningPub); err != nil {
+		return nil, err
+	}
+
+	if _, err := buf.Write(b.EncapID[:]); err != nil {
+		return nil, err
+	}
+
+	if _, err := buf.Write(b.Encap.Bytes()); err != nil {
+		return nil, err
+	}
+
+	if _, err := buf.Write(b.EncapSig); err != nil {
+		return nil, err
+	}
+
+	if hasOTPK {
+		if err := buf.WriteByte(1); err != nil {
+			return nil, err
+		}
+
+		var idBytes [4]byte
+		binary.LittleEndian.PutUint32(idBytes[:], *b.OTPKID)
+		if _, err := buf.Write(idBytes[:]); err != nil {
+			return nil, err
+		}
+
+		if _, err := buf.Write(b.OTPK.Bytes()); err != nil {
+			return nil, err
+		}
+
+		if _, err := buf.Write(b.OTPKSig); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := buf.WriteByte(0); err != nil {
+			return nil, err
+		}
+	}
+
+	if _, err := buf.Write(b.IdentityPK.Bytes()); err != nil {
+		return nil, err
+	}
+
+	if _, err := buf.Write(b.SignedPrekeyPK.Bytes()); err != nil {
+		return nil, err
+	}
+
+	if _, err := buf.Write(b.SignedPrekeySig); err != nil {
+		return nil, err
+	}
+
+	var bhLenBytes [2]byte
+	binary.LittleEndian.PutUint16(bhLenBytes[:], uint16(len(b.BundleHash)))
+	if _, err := buf.Write(bhLenBytes[:]); err != nil {
+		return nil, err
+	}
+
+	if _, err := buf.Write(b.BundleHash); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
+func (b *Bundle) UnmarshalBinary(data []byte) error {
+	if b == nil {
+		return errors.New("nil bundle receiver")
+	}
+
+	readBytes := func(p []byte, offset *int) error {
+		if *offset+len(p) > len(data) {
+			return fmt.Errorf("bundle truncated: need %d bytes at %d, have %d",
+				len(p), *offset, len(data)-*offset)
+		}
+		copy(p, data[*offset:*offset+len(p)])
+		*offset += len(p)
+		return nil
+	}
+
+	offset := 0
+
+	if offset >= len(data) {
+		return errors.New("bundle truncated before version")
+	}
+	b.Version = PQXDHVersion(data[offset])
+	offset++
+
+	sp := make([]byte, ed25519.PublicKeySize)
+	if err := readBytes(sp, &offset); err != nil {
+		return err
+	}
+	b.SigningPub = sp
+
+	var encapID KEMID
+	if err := readBytes(encapID[:], &offset); err != nil {
+		return err
+	}
+
+	encapBytes := make([]byte, mlkem.EncapsulationKeySize1024)
+	if err := readBytes(encapBytes, &offset); err != nil {
+		return err
+	}
+	encap, err := mlkem.NewEncapsulationKey1024(encapBytes)
+	if err != nil {
+		return fmt.Errorf("NewEncapsulationKey1024 failed: %w", err)
+	}
+
+	encapSig := make([]byte, ed25519.SignatureSize)
+	if err := readBytes(encapSig, &offset); err != nil {
+		return err
+	}
+
+	if offset >= len(data) {
+		return errors.New("bundle truncated before hasOTPK flag")
+	}
+	hasOTPK := data[offset]
+	offset++
+
+	var (
+		otpkID  *uint32
+		otpk    *ecdh.PublicKey
+		otpkSig []byte
+	)
+
+	if hasOTPK == 1 {
+		var idBytes [4]byte
+		if err := readBytes(idBytes[:], &offset); err != nil {
+			return err
+		}
+		id := binary.LittleEndian.Uint32(idBytes[:])
+		otpkID = &id
+
+		otpkBytes := make([]byte, 32)
+		if err := readBytes(otpkBytes, &offset); err != nil {
+			return err
+		}
+		pk, err := ecdh.X25519().NewPublicKey(otpkBytes)
+		if err != nil {
+			return fmt.Errorf("X25519 NewPublicKey for OTPK failed: %w", err)
+		}
+		otpk = pk
+
+		otpkSig = make([]byte, ed25519.SignatureSize)
+		if err := readBytes(otpkSig, &offset); err != nil {
+			return err
+		}
+	} else if hasOTPK != 0 {
+		return fmt.Errorf("invalid hasOTPK flag: %d", hasOTPK)
+	}
+
+	idpkBytes := make([]byte, 32)
+	if err := readBytes(idpkBytes, &offset); err != nil {
+		return err
+	}
+	idpk, err := ecdh.X25519().NewPublicKey(idpkBytes)
+	if err != nil {
+		return fmt.Errorf("X25519 NewPublicKey for IdentityPK failed: %w", err)
+	}
+
+	spkBytes := make([]byte, 32)
+	if err := readBytes(spkBytes, &offset); err != nil {
+		return err
+	}
+	spk, err := ecdh.X25519().NewPublicKey(spkBytes)
+	if err != nil {
+		return fmt.Errorf("X25519 NewPublicKey for SignedPrekeyPK failed: %w", err)
+	}
+
+	spkSig := make([]byte, ed25519.SignatureSize)
+	if err := readBytes(spkSig, &offset); err != nil {
+		return err
+	}
+
+	var bhLenBytes [2]byte
+	if err := readBytes(bhLenBytes[:], &offset); err != nil {
+		return err
+	}
+	bhLen := int(binary.LittleEndian.Uint16(bhLenBytes[:]))
+	if bhLen < 0 {
+		return fmt.Errorf("negative bundle hash length: %d", bhLen)
+	}
+	if offset+bhLen > len(data) {
+		return fmt.Errorf("bundle truncated: need %d bytes for hash, have %d", bhLen, len(data)-offset)
+	}
+	bundleHash := make([]byte, bhLen)
+	if err := readBytes(bundleHash, &offset); err != nil {
+		return err
+	}
+
+	if offset != len(data) {
+		return fmt.Errorf("trailing %d bytes after bundle", len(data)-offset)
+	}
+
+	b.SigningPub = sp
+	b.Encap = encap
+	b.EncapSig = encapSig
+	b.EncapID = encapID
+
+	b.OTPKID = otpkID
+	b.OTPK = otpk
+	b.OTPKSig = otpkSig
+
+	b.IdentityPK = idpk
+	b.SignedPrekeyPK = spk
+	b.SignedPrekeySig = spkSig
+
+	b.BundleHash = bundleHash
+
+	return nil
 }
