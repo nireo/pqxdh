@@ -32,7 +32,6 @@ const (
 
 	tagECx25519     byte = 0x01
 	tagMLKEM1024Pub byte = 0xA3
-	tagMLKEM768Pub  byte = 0xA4
 
 	pqxdhV1 PQXDHVersion = 1
 )
@@ -1008,7 +1007,7 @@ func (b *Bundle) UnmarshalBinary(data []byte) error {
 	}
 
 	encapSig := make([]byte, ed25519.SignatureSize)
-	if err := readBytes(encapSig, &offset); err != nil {
+	if err = readBytes(encapSig, &offset); err != nil {
 		return err
 	}
 
@@ -1026,14 +1025,14 @@ func (b *Bundle) UnmarshalBinary(data []byte) error {
 
 	if hasOTPK == 1 {
 		var idBytes [4]byte
-		if err := readBytes(idBytes[:], &offset); err != nil {
+		if err = readBytes(idBytes[:], &offset); err != nil {
 			return err
 		}
 		id := binary.LittleEndian.Uint32(idBytes[:])
 		otpkID = &id
 
 		otpkBytes := make([]byte, 32)
-		if err := readBytes(otpkBytes, &offset); err != nil {
+		if err = readBytes(otpkBytes, &offset); err != nil {
 			return err
 		}
 		pk, err := ecdh.X25519().NewPublicKey(otpkBytes)
@@ -1051,7 +1050,7 @@ func (b *Bundle) UnmarshalBinary(data []byte) error {
 	}
 
 	idpkBytes := make([]byte, 32)
-	if err := readBytes(idpkBytes, &offset); err != nil {
+	if err = readBytes(idpkBytes, &offset); err != nil {
 		return err
 	}
 	idpk, err := ecdh.X25519().NewPublicKey(idpkBytes)
@@ -1060,7 +1059,7 @@ func (b *Bundle) UnmarshalBinary(data []byte) error {
 	}
 
 	spkBytes := make([]byte, 32)
-	if err := readBytes(spkBytes, &offset); err != nil {
+	if err = readBytes(spkBytes, &offset); err != nil {
 		return err
 	}
 	spk, err := ecdh.X25519().NewPublicKey(spkBytes)
